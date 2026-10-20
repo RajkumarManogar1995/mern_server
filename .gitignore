@@ -1,5 +1,7 @@
 # Ignore installed dependencies.
-node_modules
+node_modules/
 
 # Ignore local environment secrets.
 .env
+.env.*
+!.env.example
