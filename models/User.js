@@ -26,6 +26,10 @@ const userSchema = new mongoose.Schema(
       default: 0,
       select: false,
     },
+    refreshTokenHash: {
+      type: String,
+      select: false,
+    },
   },
   { timestamps: true, optimisticConcurrency: true }
 );

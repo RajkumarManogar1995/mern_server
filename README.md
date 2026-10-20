@@ -1,6 +1,6 @@
 # MERN Login/Register API
 
-A small Node.js authentication API built with Express 5 and MongoDB/Mongoose. It supports user registration, login, viewing the signed-in user's profile, and changing a password.
+A Node.js authentication API built with Express 5 and MongoDB/Mongoose. It supports registration, login, cookie-based access and refresh tokens, viewing the signed-in user's profile, and changing a password.
 
 ## Project structure
 
@@ -9,7 +9,8 @@ A small Node.js authentication API built with Express 5 and MongoDB/Mongoose. It
 ├── app.js
 ├── server.js
 ├── config/
-│   └── db.js
+│   ├── db.js
+│   └── env.js
 ├── controllers/
 │   └── authController.js
 ├── middleware/
@@ -26,67 +27,95 @@ A small Node.js authentication API built with Express 5 and MongoDB/Mongoose. It
 └── package-lock.json
 ```
 
-`node_modules/`, `.git/`, and the real `.env` file are intentionally omitted from this tree. `services/` currently has no files: the password-reset email service was removed along with the forgot-password and reset-password features.
+`node_modules/`, `.git/`, and the private `.env` file are intentionally omitted. There is no `services/` folder at this time; forgot-password and reset-password were removed.
 
-## How a request moves through the app
+## Request flow
 
-1. `server.js` loads environment variables, validates startup configuration, connects to MongoDB, and starts the HTTP listener.
-2. `app.js` builds the Express application, installs JSON parsing, and mounts the user routes.
-3. `routes/auth.js` matches the HTTP method and URL, and attaches authentication middleware to protected endpoints.
-4. `middleware/auth.js` validates a bearer token and loads the authenticated user.
-5. `controllers/authController.js` validates request data, performs the authentication operation, and sends the response.
-6. `models/User.js` defines how user data is stored and how passwords are hashed and checked.
-7. Errors thrown by asynchronous handlers are sent to `middleware/errorHandler.js`, which creates the JSON error response.
+1. `server.js` loads validated configuration, connects to MongoDB, and starts the HTTP listener.
+2. `app.js` configures CORS, checks request origins, parses cookies and JSON, and mounts the user routes.
+3. `routes/auth.js` maps each HTTP method and path to its controller. Private routes run `middleware/auth.js` first.
+4. `controllers/authController.js` validates input, performs authentication operations, creates or rotates tokens, and sends responses.
+5. `models/User.js` defines the stored user fields and password hashing.
+6. Errors go to `middleware/errorHandler.js`, which sends a consistent JSON error response.
 
-## What each file does
+## File guide
 
-### Entry point and Express app
+### Startup and configuration
 
-- **`server.js`** is the process entry point (`npm start` and `npm run dev`). It loads `.env` relative to this file, checks `PORT`, `MONGODB_URI`, and `JWT_SECRET`, connects to the database before accepting requests, and handles `SIGINT`/`SIGTERM` shutdown by closing the HTTP server and MongoDB connection.
-- **`app.js`** configures Express without starting a listening server. It disables the `X-Powered-By` header, accepts JSON request bodies up to 10 KB, mounts the API at `/api/users`, and installs not-found and error middleware last. Keeping app setup separate from listening makes it easier to test.
-
-### Configuration and database
-
-- **`config/db.js`** contains the MongoDB connection helper. It receives the URI as an argument, connects with Mongoose, and logs the database host. Startup configuration remains in `server.js`; the database helper does not read environment variables itself.
-- **`.env.example`** documents the required local variables. Copy it to `.env` and set a strong private JWT secret. `.env` is ignored by Git; do not publish its values.
-- **`.gitignore`** excludes installed dependencies and local environment files while allowing `.env.example` to be committed.
+- **`server.js`** is the process entry point for `npm start` and `npm run dev`. It connects to the database before accepting requests and closes the HTTP and MongoDB connections on `SIGINT` or `SIGTERM`.
+- **`app.js`** configures Express without starting a network listener. It applies an exact-origin CORS policy with credentials, rejects unsafe requests that do not come from the configured frontend origin, parses cookies and JSON (up to 10 KB), mounts routes, and installs error handlers.
+- **`config/env.js`** loads `.env` from the project root and validates the port, MongoDB URI, JWT secret, and frontend origin. `JWT_SECRET` must be at least 32 bytes. `CLIENT_ORIGIN` must be one HTTP(S) origin only, with no path or trailing slash.
+- **`config/db.js`** connects Mongoose to MongoDB using a URI supplied by the startup code.
+- **`.env.example`** lists the local configuration keys. Copy it to `.env` and replace the JWT secret with a private random value. Never commit `.env`.
+- **`.gitignore`** excludes installed dependencies and private environment files while keeping `.env.example` trackable.
 
 ### Routes and controllers
 
-- **`routes/auth.js`** maps HTTP endpoints to controller functions. It does not contain database queries or authentication business logic.
-- **`controllers/authController.js`** implements registration, login, change-password, and the current-user response. It normalizes email addresses, checks inputs, creates JWTs, and returns only public user fields.
+- **`routes/auth.js`** declares the API paths and applies authentication middleware to private endpoints.
+- **`controllers/authController.js`** contains registration, login, refresh, password-change, and current-user logic. JWTs are not returned in JSON. The controller sends them only in HttpOnly cookies.
 
 ### Middleware
 
-- **`middleware/auth.js`** implements the `protect` middleware used on private endpoints. It expects `Authorization: Bearer <token>`, verifies the JWT using HS256, finds the user, and checks the token version. If the token is missing, invalid, expired, or stale, it throws an HTTP error.
-- **`middleware/HttpError.js`** is a small error type that carries an HTTP status code with an error message. Controllers and middleware use it for expected client errors such as invalid input or missing authentication.
-- **`middleware/errorHandler.js`** handles errors centrally. It maps malformed JSON, oversized request bodies, Mongoose validation/cast errors, and duplicate-key errors to suitable HTTP statuses. Unexpected server errors are logged and returned with a generic message rather than internal details. The not-found handler also lives here.
+- **`middleware/auth.js`** reads the access token from the `accessToken` cookie, verifies its HS256 signature and expiry, loads the user, and checks the token version. Missing, invalid, expired, or revoked tokens receive an HTTP 401 response.
+- **`middleware/HttpError.js`** represents expected HTTP errors with a status code and message.
+- **`middleware/errorHandler.js`** converts application, JSON parsing, request-size, and Mongoose errors into JSON responses. Unexpected server errors are logged but their details are not returned to the client.
 
 ### User model
 
-- **`models/User.js`** defines the MongoDB `User` schema: unique username and email, a password, a token version, and timestamps.
-- The password field is excluded from normal Mongoose queries (`select: false`). Login and password-change code explicitly select it only when they need to check the current password.
-- A `pre("save")` hook hashes the password with bcrypt only when it has changed. `matchPassword()` compares a submitted password against the stored hash.
-- `optimisticConcurrency` helps prevent concurrent document saves from silently overwriting each other.
-- `tokenVersion` is excluded from normal queries and included in signed-in tokens. Password changes increment it, invalidating previously issued tokens.
+- **`models/User.js`** stores unique usernames and email addresses, the password hash, a token version, a refresh-token hash, and timestamps.
+- Passwords and refresh-token hashes are excluded from ordinary database queries (`select: false`).
+- A Mongoose `pre("save")` hook hashes a password with bcrypt only when it changes. `matchPassword()` compares a supplied password with its hash.
+- `tokenVersion` invalidates old access and refresh tokens when a password changes.
+- `refreshTokenHash` stores only a SHA-256 hash of the current refresh token, never the raw refresh token.
+- Optimistic concurrency helps prevent simultaneous refresh requests from successfully rotating the same refresh token twice.
 
 ### Package files
 
-- **`package.json`** declares the app as an ES module, lists dependencies, requires Node.js 20 or later, and defines scripts:
-  - `npm run dev` runs Node's watch mode for local development.
-  - `npm start` starts the server normally.
-- **`package-lock.json`** records the exact dependency tree used by npm. Keep it in source control and update it through npm when dependencies change.
+- **`package.json`** defines the ES module project, Node.js 20+ requirement, dependencies, and `dev`/`start` scripts.
+- **`package-lock.json`** locks the dependency versions installed by npm. Keep it committed and let npm update it when dependencies change.
+
+## Authentication cookies
+
+Successful registration and login set two cookies:
+
+| Cookie | Lifetime | Purpose |
+| --- | --- | --- |
+| `accessToken` | 15 minutes | Authenticates API requests |
+| `refreshToken` | 7 days | Rotates the session and issues new tokens |
+
+Both are `HttpOnly`, `Secure`, and `SameSite=Strict`. JavaScript in the React app cannot read them. The refresh cookie is scoped to `/api/users/refresh-token`; the access cookie is sent to API paths. The refresh token is rotated on each refresh and its previous value becomes invalid.
+
+Because the model stores one refresh-token hash per user, signing in again replaces that user's previous refresh session. This simple implementation supports one active refresh session per account.
+
+### React client requests
+
+The frontend must include credentials so the browser sends and accepts cookies:
+
+```js
+const response = await fetch("http://localhost:5000/api/users/login", {
+  method: "POST",
+  credentials: "include",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ email, password }),
+});
+```
+
+Use `credentials: "include"` on authenticated requests, refresh calls, and other requests that need cookies. The browser supplies the `Origin` header; the API accepts unsafe methods only from the exact configured `CLIENT_ORIGIN`.
+
+`Secure` cookies require HTTPS in production. Modern browsers generally allow Secure cookies on `localhost` for local development; use matching `localhost` hosts for the React app and API. If local cookie behavior differs in your browser, run local HTTPS rather than disabling `Secure`.
 
 ## API endpoints
 
-All routes below are prefixed with `/api/users`.
+All routes are prefixed with `/api/users`.
 
 | Method | Path | Authentication | Purpose |
 | --- | --- | --- | --- |
-| `POST` | `/register` | No | Create an account |
-| `POST` | `/login` | No | Verify credentials and receive a JWT |
-| `GET` | `/me` | Bearer token | Return the signed-in user's public profile |
-| `PATCH` | `/change-password` | Bearer token | Verify the current password and change it |
+| `POST` | `/register` | No | Create an account and set auth cookies |
+| `POST` | `/login` | No | Verify credentials and set auth cookies |
+| `POST` | `/refresh-token` | Refresh cookie | Rotate the refresh token and issue a new access token |
+| `POST` | `/logout` | Access cookie | Invalidate the session and clear auth cookies |
+| `GET` | `/me` | Access cookie | Return the current user's public profile |
+| `PATCH` | `/change-password` | Access cookie | Change password and rotate the auth session |
 
 ### Register
 
@@ -100,9 +129,9 @@ All routes below are prefixed with `/api/users`.
 }
 ```
 
-On success, returns HTTP `201` with `id`, `username`, `email`, and a bearer `token`. The password must be at least 8 characters and no more than 72 UTF-8 bytes (bcrypt's input limit). Duplicate usernames or emails return HTTP `409`.
+Returns HTTP `201` with `{ "user": { "id", "username", "email" } }` and sets the two auth cookies. Passwords must be at least 8 characters and no more than 72 UTF-8 bytes (bcrypt's input limit). Duplicate usernames or emails return HTTP `409`.
 
-### Log in
+### Login
 
 `POST /api/users/login`
 
@@ -113,25 +142,31 @@ On success, returns HTTP `201` with `id`, `username`, `email`, and a bearer `tok
 }
 ```
 
-On success, returns HTTP `200` with the public user fields and a bearer token. Existing accounts with shorter passwords can still log in; the 8-character minimum is checked when registering or choosing a new password.
+Returns HTTP `200` with the public user fields and sets the auth cookies. Tokens are not included in the JSON body. Existing users with shorter passwords can still log in; new passwords must meet the current minimum.
+
+### Refresh session
+
+`POST /api/users/refresh-token`
+
+Send this request with `credentials: "include"`. The browser sends the HttpOnly refresh cookie automatically. The API verifies the token, checks its stored hash and token version, rotates it, and sets new access and refresh cookies. The response body is `{ "message": "Session refreshed" }`. Invalid or reused refresh tokens return HTTP `401` and clear the auth cookies.
+
+### Logout
+
+`POST /api/users/logout`
+
+Send the request with `credentials: "include"`. The API requires a valid access cookie, increments the user's token version, removes the stored refresh-token hash, clears both HttpOnly cookies, and returns `{ "message": "Logged out successfully" }`. This invalidates the current access and refresh tokens.
 
 ### Current user
 
 `GET /api/users/me`
 
-Send the JWT in the request header:
-
-```http
-Authorization: Bearer <token>
-```
-
-Returns the authenticated user's `id`, `username`, and `email`; never returns the password hash.
+Send the request with `credentials: "include"`. The access cookie authenticates the request. Returns only `id`, `username`, and `email`; never the password hash or tokens.
 
 ### Change password
 
 `PATCH /api/users/change-password`
 
-Requires the bearer token and a JSON body:
+Send the request with `credentials: "include"` and this JSON body:
 
 ```json
 {
@@ -140,28 +175,37 @@ Requires the bearer token and a JSON body:
 }
 ```
 
-The API verifies the current password, enforces the new-password length limits, saves the new bcrypt hash, increments `tokenVersion`, and returns the public user fields plus a newly issued token. Use that returned token for subsequent requests; tokens issued before the change are invalidated.
+After verifying the current password, the API saves the new bcrypt hash, invalidates previous tokens, sets a fresh access and refresh cookie pair, and returns the public user. Existing six-character passwords remain valid as the current password; the new password must be at least 8 characters and no more than 72 UTF-8 bytes.
 
-There is no forgot-password or reset-password endpoint. A user who cannot authenticate must use an account recovery process added separately by the project owner.
+There is no forgot-password or reset-password endpoint.
+
+The frontend should call the logout endpoint before clearing its in-memory user state. If the network request fails, do not report the server session as revoked; show an error or retain a retry option.
 
 ## Local setup
 
-1. Install Node.js 20 or later and MongoDB (local or hosted).
+1. Install Node.js 20 or later and run MongoDB locally or use a hosted MongoDB URI.
 2. Install dependencies from the project root:
 
    ```sh
    npm install
    ```
 
-3. Copy `.env.example` to `.env` and set the values:
+3. Copy `.env.example` to `.env`. Set your database URI, exact React development origin, and a random secret with at least 32 bytes. For example, generate a secret with:
+
+   ```sh
+   node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
+   ```
+
+   Example configuration:
 
    ```env
    PORT=5000
    MONGODB_URI=mongodb://127.0.0.1:27017/mern_login_register
-   JWT_SECRET=replace-with-a-long-random-secret
+   JWT_SECRET=paste-a-generated-secret-here
+   CLIENT_ORIGIN=http://localhost:5173
    ```
 
-   Generate a private random secret rather than keeping the example value. Keep `.env` out of version control.
+   Set `CLIENT_ORIGIN` to the exact origin of your React app. Do not add a path or trailing slash. Keep `.env` private.
 
 4. Start the development server:
 
@@ -169,11 +213,10 @@ There is no forgot-password or reset-password endpoint. A user who cannot authen
    npm run dev
    ```
 
-   For a regular start, run `npm start`. The API listens on the configured port after a successful database connection.
+   For a regular start, run `npm start`. The API listens only after the MongoDB connection succeeds.
 
-## A few implementation details
+## Notes and limitations
 
-- Express 5 forwards rejected promises from async route handlers to the error middleware. Controllers can throw `HttpError` instead of repeating `try/catch` and response code in every route.
-- Expected client errors use 4xx statuses; unexpected server errors use 500 and do not expose internal error text in the response.
-- JWTs are signed with HS256 and expire after 30 days. Keep `JWT_SECRET` private; changing it invalidates all existing JWTs.
-- The API currently has no rate limiting, email verification, password-reset flow, or automated test suite. Consider adding rate limiting and tests before exposing it to public traffic.
+- Access tokens expire after 15 minutes and refresh tokens after 7 days. Changing `JWT_SECRET` invalidates all sessions.
+- Cookies use `SameSite=Strict` as requested. The frontend and backend must be same-site for browser cookie delivery; unrelated cross-site deployments need a different cookie policy and additional CSRF protections.
+- This project currently has no rate limiting, automated test suite, multi-device refresh-token storage, or forgot-password flow. Consider adding rate limiting and tests before exposing it publicly.

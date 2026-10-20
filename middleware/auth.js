@@ -3,19 +3,14 @@ import jwt from "jsonwebtoken";
 import HttpError from "./HttpError.js";
 
 export const protect = async (req, res, next) => {
-  const authorization = req.headers.authorization;
-  const match =
-    typeof authorization === "string"
-      ? authorization.match(/^Bearer\s+(.+)$/i)
-      : null;
-
-  if (!match) {
+  const token = req.cookies?.accessToken;
+  if (typeof token !== "string" || !token) {
     throw new HttpError(401, "Authentication required");
   }
 
   let decoded;
   try {
-    decoded = jwt.verify(match[1], process.env.JWT_SECRET, {
+    decoded = jwt.verify(token, process.env.JWT_SECRET, {
       algorithms: ["HS256"],
     });
   } catch {
@@ -26,7 +21,8 @@ export const protect = async (req, res, next) => {
     typeof decoded !== "object" ||
     decoded === null ||
     typeof decoded.id !== "string" ||
-    !Number.isSafeInteger(decoded.tokenVersion ?? 0)
+    decoded.type !== "access" ||
+    !Number.isSafeInteger(decoded.tokenVersion)
   ) {
     throw new HttpError(401, "Invalid or expired token");
   }
@@ -35,7 +31,7 @@ export const protect = async (req, res, next) => {
   if (!req.user) {
     throw new HttpError(401, "User no longer exists");
   }
-  if ((decoded.tokenVersion ?? 0) !== req.user.tokenVersion) {
+  if (decoded.tokenVersion !== req.user.tokenVersion) {
     throw new HttpError(401, "Session expired. Please log in again.");
   }
 
